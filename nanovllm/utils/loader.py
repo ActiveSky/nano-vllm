@@ -1,15 +1,22 @@
+"""加载 safetensors 权重，并支持打包参数的拆分映射。"""
+
 import os
 from glob import glob
+
 import torch
-from torch import nn
 from safetensors import safe_open
+from torch import nn
 
 
-def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
+def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+    """默认的权重拷贝方式，直接把张量写入参数。"""
+
     param.data.copy_(loaded_weight)
 
 
-def load_model(model: nn.Module, path: str):
+def load_model(model: nn.Module, path: str) -> None:
+    """从指定目录中的 safetensors 文件加载模型权重。"""
+
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
@@ -20,6 +27,7 @@ def load_model(model: nn.Module, path: str):
                         param_name = weight_name.replace(k, v)
                         param = model.get_parameter(param_name)
                         weight_loader = getattr(param, "weight_loader")
+                        # 打包权重会按子模块名拆分，交给自定义 loader 处理。
                         weight_loader(param, f.get_tensor(weight_name), shard_id)
                         break
                 else:

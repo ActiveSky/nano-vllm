@@ -1,3 +1,5 @@
+"""定义 Qwen3 模型结构以及与 Nano-vLLM 组件的组装方式。"""
+
 import torch
 from torch import nn
 import torch.distributed as dist
@@ -12,6 +14,8 @@ from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
 
 class Qwen3Attention(nn.Module):
+
+    """Qwen3 的单层自注意力模块。"""
 
     def __init__(
         self,
@@ -73,7 +77,10 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """完成 QKV 投影、RoPE、注意力和输出投影。"""
+
         qkv = self.qkv_proj(hidden_states)
+        # 按 q/k/v 三段拆开，再 reshape 成多头格式。
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q = q.view(-1, self.num_heads, self.head_dim)
         k = k.view(-1, self.num_kv_heads, self.head_dim)
@@ -88,6 +95,8 @@ class Qwen3Attention(nn.Module):
 
 
 class Qwen3MLP(nn.Module):
+
+    """Qwen3 的前馈网络，使用 gate/up 合并投影。"""
 
     def __init__(
         self,
@@ -110,6 +119,8 @@ class Qwen3MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        """先做门控投影，再通过下投影回到 hidden size。"""
+
         gate_up = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x = self.down_proj(x)
@@ -117,6 +128,8 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
+
+    """Qwen3 的单个 decoder block。"""
 
     def __init__(
         self,
@@ -148,6 +161,8 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """执行 attention、残差融合和 MLP。"""
+
         if residual is None:
             hidden_states, residual = self.input_layernorm(hidden_states), hidden_states
         else:
@@ -159,6 +174,8 @@ class Qwen3DecoderLayer(nn.Module):
 
 
 class Qwen3Model(nn.Module):
+
+    """由 embedding、多层 decoder 和最终 norm 组成的主体模型。"""
 
     def __init__(
         self,
@@ -174,6 +191,8 @@ class Qwen3Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        """从 token id 和位置编码出发，逐层计算 hidden states。"""
+
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         for layer in self.layers:
@@ -183,6 +202,9 @@ class Qwen3Model(nn.Module):
 
 
 class Qwen3ForCausalLM(nn.Module):
+
+    """带语言模型头的 Qwen3 封装。"""
+
     packed_modules_mapping = {
         "q_proj": ("qkv_proj", "q"),
         "k_proj": ("qkv_proj", "k"),
@@ -206,10 +228,14 @@ class Qwen3ForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ) -> torch.Tensor:
+        """只返回最后一层 hidden states，logits 由 compute_logits 负责。"""
+
         return self.model(input_ids, positions)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """把 hidden states 投影到词表空间。"""
+
         return self.lm_head(hidden_states)

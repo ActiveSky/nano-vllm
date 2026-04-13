@@ -1,11 +1,15 @@
+"""根据等待队列、运行队列和 KV cache 余量决定本轮执行哪些序列。"""
+
 from collections import deque
 
 from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.sequence import Sequence, SequenceStatus
 
 
 class Scheduler:
+
+    """维护 waiting/running 队列，并在 prefill 和 decode 间切换。"""
 
     def __init__(self, config: Config):
         self.max_num_seqs = config.max_num_seqs
@@ -15,10 +19,14 @@ class Scheduler:
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
-    def is_finished(self):
+    def is_finished(self) -> bool:
+        """当等待队列和运行队列都为空时，调度结束。"""
+
         return not self.waiting and not self.running
 
-    def add(self, seq: Sequence):
+    def add(self, seq: Sequence) -> None:
+        """把新请求放入等待队列。"""
+
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool]:
@@ -40,7 +48,7 @@ class Scheduler:
         if scheduled_seqs:
             return scheduled_seqs, True
 
-        # decode
+        # 如果没有新的 prefill 请求，再从运行中的序列里挑选 decode。
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
@@ -57,12 +65,16 @@ class Scheduler:
         self.running.extendleft(reversed(scheduled_seqs))
         return scheduled_seqs, False
 
-    def preempt(self, seq: Sequence):
+    def preempt(self, seq: Sequence) -> None:
+        """当空闲块不足时，将序列驱回 waiting 队列。"""
+
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
+    def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> None:
+        """把模型输出写回序列，并在结束条件满足时释放资源。"""
+
         for seq, token_id in zip(seqs, token_ids):
             seq.append_token(token_id)
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:

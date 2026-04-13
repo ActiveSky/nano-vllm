@@ -1,4 +1,7 @@
+"""实现 Rotary Positional Embedding。"""
+
 from functools import lru_cache
+
 import torch
 from torch import nn
 
@@ -8,6 +11,8 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
+    """把 RoPE 旋转应用到一组 query/key 向量上。"""
+
     x1, x2 = torch.chunk(x.float(), 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
@@ -15,6 +20,8 @@ def apply_rotary_emb(
 
 
 class RotaryEmbedding(nn.Module):
+
+    """预计算 RoPE 的 cos/sin 缓存，并在前向中直接索引。"""
 
     def __init__(
         self,
@@ -41,6 +48,8 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """对 query 和 key 应用对应位置的 RoPE。"""
+
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query = apply_rotary_emb(query, cos, sin)
@@ -56,6 +65,8 @@ def get_rope(
     base: float,
     rope_scaling: dict | None = None,
 ):
+    """缓存并返回一个 RoPE 模块实例。"""
+
     assert rope_scaling is None
     rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
     return rotary_emb

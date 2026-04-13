@@ -1,9 +1,13 @@
+"""最小使用示例，演示如何加载模型并调用生成接口。"""
+
 import os
+
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 
 def main():
+    """加载 tokenizer 和模型，然后对两个提示词执行生成。"""
     path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
     tokenizer = AutoTokenizer.from_pretrained(path)
     llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
@@ -24,6 +28,7 @@ def main():
     outputs = llm.generate(prompts, sampling_params)
 
     for prompt, output in zip(prompts, outputs):
+        # 将 prompt 和模型输出一起打印，方便观察完整的对话格式。
         print("\n")
         print(f"Prompt: {prompt!r}")
         print(f"Completion: {output['text']!r}")
