@@ -17,7 +17,7 @@ class Sequence:
     block_size = 256
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(self, token_ids: list[int], sampling_params=SamplingParams()):
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
@@ -53,12 +53,12 @@ class Sequence:
     @property
     def prompt_token_ids(self):
         """返回 prompt 部分的 token 切片。"""
-        return self.token_ids[:self.num_prompt_tokens]
+        return self.token_ids[: self.num_prompt_tokens]
 
     @property
     def completion_token_ids(self):
         """返回已生成补全部分的 token 切片。"""
-        return self.token_ids[self.num_prompt_tokens:]
+        return self.token_ids[self.num_prompt_tokens :]
 
     @property
     def num_blocks(self):
@@ -73,7 +73,7 @@ class Sequence:
     def block(self, i):
         """返回第 i 个 block_size 长度的 token 切片。"""
         assert 0 <= i < self.num_blocks
-        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
+        return self.token_ids[i * self.block_size : (i + 1) * self.block_size]
 
     def append_token(self, token_id: int):
         """追加一个补全 token 并更新末尾 token 与总长度。"""
@@ -84,11 +84,25 @@ class Sequence:
     def __getstate__(self):
         """进程间传输时的精简状态：prefill 传整段 token_ids，decode 仅传 last_token。"""
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.num_scheduled_tokens,
+            self.block_table,
+            last_state,
+        )
 
     def __setstate__(self, state):
         """根据精简状态恢复序列：last_state 为 list 时重建整段 token_ids，否则仅恢复末尾 token。"""
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
+        (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.num_scheduled_tokens,
+            self.block_table,
+            last_state,
+        ) = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]

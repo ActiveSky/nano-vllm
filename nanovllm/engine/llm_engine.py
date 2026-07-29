@@ -52,10 +52,14 @@ class LLMEngine:
     def step(self):
         """执行一次调度、前向与后处理，并返回已完成序列的输出与本步 token 吞吐量。"""
         seqs, is_prefill = self.scheduler.schedule()
-        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
+        num_tokens = (
+            sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
+        )
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
-        outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
+        outputs = [
+            (seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished
+        ]
         return outputs, num_tokens
 
     def is_finished(self) -> bool:
@@ -69,14 +73,19 @@ class LLMEngine:
         use_tqdm: bool = True,
     ) -> list[dict]:
         """批量生成文本，逐条入队后循环 step，返回每个请求的 text 与 token_ids。"""
-        pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
+        pbar = tqdm(
+            total=len(prompts),
+            desc="Generating",
+            dynamic_ncols=True,
+            disable=not use_tqdm,
+        )
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
         # 逐条将请求放入等待队列，随后由调度器统一处理。
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
         outputs = {}
-        prefill_throughput = decode_throughput = 0.
+        prefill_throughput = decode_throughput = 0.0
         while not self.is_finished():
             t = perf_counter()
             output, num_tokens = self.step()
@@ -84,14 +93,19 @@ class LLMEngine:
                 prefill_throughput = num_tokens / (perf_counter() - t)
             else:
                 decode_throughput = -num_tokens / (perf_counter() - t)
-            pbar.set_postfix({
-                "Prefill": f"{int(prefill_throughput)}tok/s",
-                "Decode": f"{int(decode_throughput)}tok/s",
-            })
+            pbar.set_postfix(
+                {
+                    "Prefill": f"{int(prefill_throughput)}tok/s",
+                    "Decode": f"{int(decode_throughput)}tok/s",
+                }
+            )
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
                 pbar.update(1)
         pbar.close()
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
-        outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
+        outputs = [
+            {"text": self.tokenizer.decode(token_ids), "token_ids": token_ids}
+            for token_ids in outputs
+        ]
         return outputs

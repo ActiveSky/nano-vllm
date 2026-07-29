@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 
 class SiluAndMul(nn.Module):
-
     """将输入拆成两半，前半做 SiLU 后与后半逐元素相乘。"""
 
     @torch.compile
