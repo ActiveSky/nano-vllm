@@ -1,27 +1,21 @@
-"""单个进程上的模型执行器，负责真正跑前向、采样和 KV cache 管理。"""
-
 import pickle
-from multiprocessing.shared_memory import SharedMemory
-from multiprocessing.synchronize import Event
-
 import torch
 import torch.distributed as dist
+from multiprocessing.synchronize import Event
+from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
-from nanovllm.layers.sampler import Sampler
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.utils.context import get_context, reset_context, set_context
+from nanovllm.layers.sampler import Sampler
+from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
 
 class ModelRunner:
-
-    """负责单个 rank 上的模型加载、执行和采样。"""
+    """在 GPU 进程中加载模型、维护 KV cache 并执行 prefill/decode 前向与采样。"""
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
-        """初始化分布式进程、加载模型并准备 KV cache。"""
-
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
@@ -33,7 +27,7 @@ class ModelRunner:
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
         self.model = Qwen3ForCausalLM(hf_config)
         load_model(self.model, config.model)
@@ -54,9 +48,8 @@ class ModelRunner:
                 self.shm = SharedMemory(name="nanovllm")
                 self.loop()
 
-    def exit(self) -> None:
-        """释放 CUDA、进程组和共享内存资源。"""
-
+    def exit(self):
+        """释放共享内存与 CUDA Graph 资源并销毁进程组。"""
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
@@ -67,9 +60,8 @@ class ModelRunner:
         torch.cuda.synchronize()
         dist.destroy_process_group()
 
-    def loop(self) -> None:
-        """从共享内存读取指令并在子进程里执行。"""
-
+    def loop(self):
+        """rank>0 的从进程主循环：持续从共享内存读取并分发方法调用。"""
         while True:
             method_name, args = self.read_shm()
             self.call(method_name, *args)
@@ -77,8 +69,7 @@ class ModelRunner:
                 break
 
     def read_shm(self):
-        """阻塞读取 rank 0 写入的共享内存消息。"""
-
+        """从进程等待事件后从共享内存反序列化出方法名与参数。"""
         assert self.world_size > 1 and self.rank > 0
         self.event.wait()
         n = int.from_bytes(self.shm.buf[0:4], "little")
@@ -86,9 +77,8 @@ class ModelRunner:
         self.event.clear()
         return method_name, args
 
-    def write_shm(self, method_name, *args) -> None:
-        """把调用指令写入共享内存并唤醒其他 rank。"""
-
+    def write_shm(self, method_name, *args):
+        """主进程把方法调用序列化写入共享内存并唤醒所有从进程。"""
         assert self.world_size > 1 and self.rank == 0
         data = pickle.dumps([method_name, *args])
         n = len(data)
@@ -98,27 +88,27 @@ class ModelRunner:
             event.set()
 
     def call(self, method_name, *args):
-        """在 rank 0 上广播调用，在所有 rank 上执行同名方法。"""
-
+        """同步分发方法调用：多卡时先广播给从进程，再在本地执行。"""
         if self.world_size > 1 and self.rank == 0:
             self.write_shm(method_name, *args)
         method = getattr(self, method_name, None)
         return method(*args)
 
-    def warmup_model(self) -> None:
-        """用一批满长度序列预热模型和显存分配。"""
-
+    def warmup_model(self):
+        """用最大 batch 的假数据跑一次 prefill，触发 cudnn/编译缓存并统计峰值显存。"""
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        seq_len = min(max_num_batched_tokens, max_model_len)
+        num_seqs = min(max_num_batched_tokens // seq_len, self.config.max_num_seqs)
+        seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
+        for seq in seqs:
+            seq.num_scheduled_tokens = seq_len
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
-    def allocate_kv_cache(self) -> None:
-        """根据剩余显存计算 KV cache 上限并分配缓存张量。"""
-
+    def allocate_kv_cache(self):
+        """根据剩余显存与目标利用率计算 KV cache 块数，并为每层 attention 挂载 k/v 缓存。"""
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
@@ -127,7 +117,7 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
@@ -139,16 +129,14 @@ class ModelRunner:
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
-        """把每条序列的 block_table 拼成 GPU 上的批量张量。"""
-
+        """把各序列的 block_table 补齐到同一长度后打包成 GPU 张量。"""
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
-        """为 prefill 阶段准备输入、位置和上下文张量。"""
-
+        """为 prefill 阶段组装 input_ids/positions/cu_seqlens 与逐块 slot_mapping，支持 chunked prefill 与 prefix cache。"""
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -158,25 +146,29 @@ class ModelRunner:
         slot_mapping = []
         block_tables = None
         for seq in seqs:
-            seqlen = len(seq)
-            input_ids.extend(seq[seq.num_cached_tokens:])
-            positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
+            start = seq.num_cached_tokens
+            seqlen_q = seq.num_scheduled_tokens
+            end = start + seqlen_q
+            seqlen_k = end
+            input_ids.extend(seq[start:end])
+            positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
             if not seq.block_table:    # warmup
                 continue
-            # prefix cache 命中时，只把尚未缓存的块映射到 slot。
-            for i in range(seq.num_cached_blocks, seq.num_blocks):
-                start = seq.block_table[i] * self.block_size
-                if i != seq.num_blocks - 1:
-                    end = start + self.block_size
+            start_block = start // self.block_size
+            end_block = (end + self.block_size - 1) // self.block_size
+            for i in range(start_block, end_block):
+                slot_start = seq.block_table[i] * self.block_size
+                if i == start_block:
+                    slot_start += start % self.block_size
+                if i != end_block - 1:
+                    slot_end = seq.block_table[i] * self.block_size + self.block_size
                 else:
-                    end = start + seq.last_block_num_tokens 
-                slot_mapping.extend(list(range(start, end)))
+                    slot_end = seq.block_table[i] * self.block_size + end - i * self.block_size
+                slot_mapping.extend(range(slot_start, slot_end))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -188,8 +180,7 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
-        """为 decode 阶段准备单 token 输入和上下文张量。"""
-
+        """为 decode 阶段组装单 token 的输入、位置与 slot 映射，并打包 block_tables。"""
         input_ids = []
         positions = []
         slot_mapping = []
@@ -209,17 +200,13 @@ class ModelRunner:
 
     def prepare_sample(self, seqs: list[Sequence]):
         """把每个序列的采样温度打包成 GPU 张量。"""
-
-        temperatures = []
-        for seq in seqs:
-            temperatures.append(seq.temperature)
+        temperatures = [seq.temperature for seq in seqs]
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
-        """执行前向并在需要时复用 CUDA graph。"""
-
+        """执行模型前向并返回 logits：prefill/大 batch 走 eager，小 decode 走 CUDA Graph replay。"""
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
@@ -237,9 +224,8 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int] | None:
-        """完成一次调度到采样的完整执行流程。"""
-
+    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+        """一次完整推理：准备输入 → 前向 → 采样，返回 token id 列表（仅 rank 0）。"""
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
@@ -248,9 +234,7 @@ class ModelRunner:
         return token_ids
 
     @torch.inference_mode()
-    def capture_cudagraph(self) -> None:
-        """为多个 batch size 预捕获 CUDA graph 以减少调度开销。"""
-
+    def capture_cudagraph(self):
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)

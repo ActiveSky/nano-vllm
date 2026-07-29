@@ -173,6 +173,9 @@ class RowParallelLinear(LinearBase):
         """只加载当前 rank 对应的输入分片。"""
 
         param_data = param.data
+        if param_data.ndim == 1:
+            param_data.copy_(loaded_weight)
+            return
         shard_size = param_data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from transformers import AutoConfig
 
 
-@dataclass
+@dataclass(slots=True)
 class Config:
     """推理引擎启动时使用的静态配置。"""
 
@@ -32,4 +32,3 @@ class Config:
         self.hf_config = AutoConfig.from_pretrained(self.model)
         # 真实可用的上下文长度不能超过模型本身的最大位置编码上限。
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
-        assert self.max_num_batched_tokens >= self.max_model_len

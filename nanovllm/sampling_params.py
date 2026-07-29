@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplingParams:
     """描述一次生成请求的温度、长度和 EOS 行为。"""
 

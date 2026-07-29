@@ -63,10 +63,8 @@ def get_rope(
     rotary_dim: int,
     max_position: int,
     base: float,
-    rope_scaling: dict | None = None,
 ):
     """缓存并返回一个 RoPE 模块实例。"""
 
-    assert rope_scaling is None
     rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base)
     return rotary_emb

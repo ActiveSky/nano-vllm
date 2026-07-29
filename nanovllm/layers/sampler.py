@@ -8,9 +8,6 @@ class Sampler(nn.Module):
 
     """把 logits 转换成最终采样 token id。"""
 
-    def __init__(self):
-        super().__init__()
-
     @torch.compile
     def forward(self, logits: torch.Tensor, temperatures: torch.Tensor):
         """先做温度缩放，再通过随机扰动选出 token。"""

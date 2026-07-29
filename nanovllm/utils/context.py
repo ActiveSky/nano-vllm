@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 
 
-@dataclass
+@dataclass(slots=True)
 class Context:
     """单次推理 step 需要在算子之间传递的辅助张量集合。"""
 
