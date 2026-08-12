@@ -1,3 +1,7 @@
 [submodule "third_party/flash-attention"]
 	path = third_party/flash-attention
 	url = https://github.com/Dao-AILab/flash-attention.git
+[submodule "third_party/learn-nano-vllm"]
+	path = third_party/learn-nano-vllm
+	url = https://github.com/bcefghj/learn-nano-vllm.git
+	branch = main
