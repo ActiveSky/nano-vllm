@@ -25,7 +25,7 @@ def main():
         )
         for prompt in prompts
     ]
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompts, sampling_params) #一次输入多个prompts
 
     for prompt, output in zip(prompts, outputs):
         # 将 prompt 和模型输出一起打印，方便观察完整的对话格式。
